@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Generated repository (local testing)
+repo/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Keys (keep public keys)
+*.key
+!*.pub

@@ -1,0 +1,22 @@
+# APK Repository Generator - Project Configuration
+#
+# Define GitHub repositories that release .apk packages.
+# The generator will fetch releases and build an Alpine APK repository.
+
+# Repository settings
+settings:
+  # Repository base URL
+  baseurl: https://bordeux.github.io/apk-repo
+  # Architectures to support
+  architectures:
+    - x86_64
+    - aarch64
+  # Repository description
+  description: "Bordeux Alpine Packages"
+  # Key name prefix (for signing)
+  key_name: alpine@bordeux
+
+# Projects to include in the repository
+projects:
+  - repo: bordeux/tmpltool
+    keep_versions: 1
