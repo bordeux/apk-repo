@@ -1,0 +1,51 @@
+{
+  "packages": [
+    {
+      "name": "tmpltool",
+      "version": "1.2.5",
+      "architecture": "aarch64",
+      "url": "https://github.com/bordeux/tmpltool/releases/download/v1.2.5/tmpltool-1.2.5-r0-aarch64.apk",
+      "filename": "tmpltool-1.2.5-r0.apk",
+      "project_repo": "bordeux/tmpltool",
+      "size": 2789470,
+      "sha256": "9efe863f9f6d53dbb54c292920b936e4691118b49850b4ba8e7232337a22cc70",
+      "checksum": "Q16LDG0gaWd3R+sJ0BivWBBpYnCNI=",
+      "pkgname": "tmpltool",
+      "pkgver": "1.2.5-r0",
+      "pkgdesc": "A fast and simple command-line template rendering tool using MiniJinja templates",
+      "arch": "aarch64",
+      "license": "MIT",
+      "origin": "tmpltool",
+      "maintainer": "Chris Bednarczyk <tmpltool@bordeux.net>",
+      "builddate": "1767342782",
+      "commit": "",
+      "provider_priority": "",
+      "provides": "",
+      "depends": ""
+    },
+    {
+      "name": "tmpltool",
+      "version": "1.2.5",
+      "architecture": "x86_64",
+      "url": "https://github.com/bordeux/tmpltool/releases/download/v1.2.5/tmpltool-1.2.5-r0-x86_64.apk",
+      "filename": "tmpltool-1.2.5-r0.apk",
+      "project_repo": "bordeux/tmpltool",
+      "size": 2683386,
+      "sha256": "c2c94eedbfd852725e98ce06894e789e0d5a269b054e99d7568432448700ba68",
+      "checksum": "Q1+hglmwecOJIWN5Ng/XPpb7uL9d8=",
+      "pkgname": "tmpltool",
+      "pkgver": "1.2.5-r0",
+      "pkgdesc": "A fast and simple command-line template rendering tool using MiniJinja templates",
+      "arch": "x86_64",
+      "license": "MIT",
+      "origin": "tmpltool",
+      "maintainer": "Chris Bednarczyk <tmpltool@bordeux.net>",
+      "builddate": "1767342726",
+      "commit": "",
+      "provider_priority": "",
+      "provides": "",
+      "depends": ""
+    }
+  ],
+  "updated": "2026-01-02T12:27:55.930988+00:00"
+}
