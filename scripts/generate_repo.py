@@ -483,7 +483,8 @@ def sign_index(apkindex_path: Path, private_key_path: Path, key_name: str) -> bo
         # Concatenate: [sig gzip stream] + [control gzip stream]
         sig_name = f".SIGN.RSA.{key_name}.rsa.pub"
 
-        # Create signature tar
+        # Create signature tar manually (without end-of-archive markers)
+        # Tar format: 512-byte header + content padded to 512-byte blocks
         sig_tar_io = BytesIO()
         with tarfile.open(fileobj=sig_tar_io, mode="w") as tar:
             sig_info = tarfile.TarInfo(name=sig_name)
@@ -491,6 +492,11 @@ def sign_index(apkindex_path: Path, private_key_path: Path, key_name: str) -> bo
             sig_info.mtime = int(datetime.now().timestamp())
             tar.addfile(sig_info, BytesIO(signature_data))
         sig_tar_data = sig_tar_io.getvalue()
+
+        # Strip end-of-archive markers (two 512-byte null blocks)
+        # Alpine expects signature tar without these markers
+        while sig_tar_data.endswith(b'\x00' * 512):
+            sig_tar_data = sig_tar_data[:-512]
 
         # Gzip the signature tar
         sig_gz_io = BytesIO()
