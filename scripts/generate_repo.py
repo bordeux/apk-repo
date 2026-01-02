@@ -274,9 +274,10 @@ def rebuild_apk_with_mkpkg(apk_path: Path, private_key: Optional[Path] = None, f
         force: If True, rebuild even if already processed
     """
     try:
-        # Check if apk mkpkg is available
+        # Check if apk mkpkg is available (--help returns 1 but still means it exists)
         result = subprocess.run(["apk", "mkpkg", "--help"], capture_output=True, timeout=10)
-        if result.returncode != 0:
+        # apk mkpkg --help returns 1 but outputs help text to stdout
+        if b"Usage: apk mkpkg" not in result.stdout and b"mkpkg" not in result.stderr:
             print(f"    Warning: apk mkpkg not available, skipping rebuild")
             return False
     except (subprocess.SubprocessError, FileNotFoundError):
