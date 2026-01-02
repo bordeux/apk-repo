@@ -833,7 +833,7 @@ def main():
     parser.add_argument(
         "--rebuild",
         action="store_true",
-        help="Force rebuild (re-download and re-process all packages)",
+        help="Force rebuild packages (with --project: only that project, without: all)",
     )
 
     args = parser.parse_args()
@@ -889,22 +889,39 @@ def main():
 
     # If rebuild mode, clear existing packages for projects being updated
     if args.rebuild and not args.dry_run:
-        print("\n[Rebuild mode: clearing existing packages]")
+        # Build set of filenames to remove (only for projects being updated)
+        files_to_remove = {
+            pkg.filename for pkg in existing_packages
+            if pkg.project_repo in projects_to_update
+        }
+
+        if args.project:
+            print(f"\n[Rebuild mode: clearing packages for {args.project}]")
+        else:
+            print("\n[Rebuild mode: clearing all packages]")
+
         for arch in settings.architectures:
             arch_dir = output_dir / arch
             if arch_dir.exists():
                 for apk_file in arch_dir.glob("*.apk"):
-                    apk_file.unlink()
-                    print(f"  Removed {apk_file}")
-                # Also remove APKINDEX
+                    # Only remove if it belongs to projects being updated
+                    if apk_file.name in files_to_remove or not args.project:
+                        apk_file.unlink()
+                        print(f"  Removed {apk_file}")
+                # Remove APKINDEX (will be regenerated)
                 apkindex = arch_dir / "APKINDEX.tar.gz"
                 if apkindex.exists():
                     apkindex.unlink()
-        # Clear manifest
-        manifest_path = output_dir / MANIFEST_FILE
-        if manifest_path.exists():
-            manifest_path.unlink()
-        preserved_packages = []
+
+        # Update preserved packages (keep packages from other projects)
+        if args.project:
+            # Keep packages from projects NOT being rebuilt
+            preserved_packages = [
+                pkg for pkg in existing_packages
+                if pkg.project_repo not in projects_to_update
+            ]
+        else:
+            preserved_packages = []
 
     # Collect new packages
     new_packages: list[ApkPackage] = []
@@ -937,17 +954,14 @@ def main():
                     # First check if already exists with expected Alpine name pattern
                     existing_files = list(arch_dir.glob(f"{pkg.name}-{pkg.version}*.apk"))
 
-                    needs_download = True
                     needs_rebuild = True
 
                     if existing_files and not args.rebuild:
                         apk_path = existing_files[0]
                         print(f"      Already exists as {apk_path.name}")
-                        needs_download = False
                         needs_rebuild = False
                     elif original_path.exists() and not args.rebuild:
                         apk_path = original_path
-                        needs_download = False
                         needs_rebuild = False
                     else:
                         print(f"      Downloading...")
