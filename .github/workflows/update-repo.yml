@@ -13,7 +13,7 @@ on:
         type: boolean
         default: false
       rebuild:
-        description: 'Force rebuild all packages (re-download and re-process)'
+        description: 'Force rebuild packages (rebuilds specific project if set, otherwise all)'
         required: false
         type: boolean
         default: false
