@@ -263,16 +263,32 @@ def add_apk_checksums(apk_path: Path) -> bool:
     APK v2 format:
     - Two concatenated gzip streams: control.tar.gz + data.tar.gz
     - datahash field in .PKGINFO = SHA256 of compressed data.tar.gz
-    - PAX headers with APK-TOOLS.checksum.SHA1 for each file
+    - PAX headers with APK-TOOLS.checksum.SHA1 for each file (hex format)
+    - All entries use PAX format with ctime=0, atime=0, uid=0, gid=0
     """
-    import base64
     import gzip
+
+    def make_pax_member(name: str, size: int, mtime: int, is_dir: bool = False) -> tarfile.TarInfo:
+        """Create a TarInfo with proper PAX format for Alpine."""
+        member = tarfile.TarInfo(name=name)
+        member.size = size
+        member.mtime = mtime
+        member.mode = 0o755 if is_dir else 0o644
+        member.type = tarfile.DIRTYPE if is_dir else tarfile.REGTYPE
+        member.uid = 0
+        member.gid = 0
+        member.uname = "root"
+        member.gname = "root"
+        # PAX headers required by Alpine
+        member.pax_headers = {"ctime": "0", "atime": "0"}
+        return member
 
     try:
         # Read and extract original APK
         control_members = []  # .PKGINFO and scripts (.pre-install, .post-install, etc.)
         data_members = []     # Everything else
         pkginfo_content = None
+        builddate = int(datetime.now().timestamp())
 
         with tarfile.open(apk_path, "r:gz") as tar:
             for member in tar.getmembers():
@@ -287,6 +303,13 @@ def add_apk_checksums(apk_path: Path) -> bool:
                     control_members.append((member, data))
                     if member.name == ".PKGINFO" and data:
                         pkginfo_content = data.decode("utf-8", errors="replace")
+                        # Extract builddate for mtime
+                        for line in pkginfo_content.split("\n"):
+                            if line.startswith("builddate"):
+                                try:
+                                    builddate = int(line.split("=")[1].strip())
+                                except (ValueError, IndexError):
+                                    pass
                 else:
                     data_members.append((member, data))
 
@@ -298,20 +321,24 @@ def add_apk_checksums(apk_path: Path) -> bool:
         if "datahash = " in pkginfo_content:
             return True  # Already properly formatted
 
-        # Create data.tar.gz with PAX checksums
+        # Create data.tar with PAX checksums (hex format like official Alpine)
         data_tar_io = BytesIO()
-        with tarfile.open(fileobj=data_tar_io, mode="w") as tar:
+        with tarfile.open(fileobj=data_tar_io, mode="w", format=tarfile.PAX_FORMAT) as tar:
             for member, data in data_members:
+                # Create new member with proper PAX format
+                new_member = make_pax_member(
+                    member.name, member.size, builddate, is_dir=member.isdir()
+                )
+
                 if data is not None:
-                    # Add PAX header with SHA1 checksum
+                    # Add PAX header with SHA1 checksum in HEX format (not base64!)
                     sha1 = hashlib.sha1()
                     sha1.update(data)
-                    checksum = base64.b64encode(sha1.digest()).decode("ascii")
-                    member.pax_headers = member.pax_headers or {}
-                    member.pax_headers["APK-TOOLS.checksum.SHA1"] = checksum
-                    tar.addfile(member, BytesIO(data))
+                    checksum = sha1.hexdigest()  # Hex format like official Alpine
+                    new_member.pax_headers["APK-TOOLS.checksum.SHA1"] = checksum
+                    tar.addfile(new_member, BytesIO(data))
                 else:
-                    tar.addfile(member)
+                    tar.addfile(new_member)
         data_tar_data = data_tar_io.getvalue()
 
         # Gzip the data tar
@@ -328,19 +355,23 @@ def add_apk_checksums(apk_path: Path) -> bool:
         pkginfo_lines.append(f"datahash = {datahash}")
         new_pkginfo = "\n".join(pkginfo_lines) + "\n"
 
-        # Create control.tar.gz
+        # Create control.tar with PAX format
         control_tar_io = BytesIO()
-        with tarfile.open(fileobj=control_tar_io, mode="w") as tar:
+        with tarfile.open(fileobj=control_tar_io, mode="w", format=tarfile.PAX_FORMAT) as tar:
             for member, data in control_members:
+                new_member = make_pax_member(
+                    member.name, member.size, builddate, is_dir=member.isdir()
+                )
+
                 if member.name == ".PKGINFO":
                     # Use updated PKGINFO
                     new_data = new_pkginfo.encode("utf-8")
-                    member.size = len(new_data)
-                    tar.addfile(member, BytesIO(new_data))
+                    new_member.size = len(new_data)
+                    tar.addfile(new_member, BytesIO(new_data))
                 elif data is not None:
-                    tar.addfile(member, BytesIO(data))
+                    tar.addfile(new_member, BytesIO(data))
                 else:
-                    tar.addfile(member)
+                    tar.addfile(new_member)
         control_tar_data = control_tar_io.getvalue()
 
         # Gzip the control tar
