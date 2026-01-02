@@ -177,12 +177,46 @@ def compute_sha256(filepath: Path) -> str:
 
 
 def compute_apk_checksum(filepath: Path) -> str:
-    """Compute APK checksum in Alpine format (Q1 + base64-encoded SHA1)."""
+    """Compute APK checksum in Alpine format (Q1 + base64-encoded SHA1).
+
+    For multi-stream APKs: SHA1 of control segment (second gzip stream)
+    For single-stream APKs: SHA1 of entire file
+    """
     import base64
-    sha1 = hashlib.sha1()
+    import gzip
+    from io import BytesIO
+
     with open(filepath, "rb") as f:
-        while chunk := f.read(8192):
-            sha1.update(chunk)
+        data = f.read()
+
+    # Count gzip streams by sequential decompression
+    stream_count = 0
+    stream_boundaries = []
+    remaining = BytesIO(data)
+
+    while remaining.tell() < len(data):
+        start = remaining.tell()
+        try:
+            gz = gzip.GzipFile(fileobj=remaining)
+            gz.read()  # Decompress to find end
+            end = remaining.tell()
+            stream_boundaries.append((start, end))
+            stream_count += 1
+            if stream_count > 3:  # APKs have max 3 streams
+                break
+        except (EOFError, OSError):
+            break
+
+    if stream_count >= 2:
+        # Multi-stream APK: hash the control segment (2nd stream)
+        control_start, control_end = stream_boundaries[1]
+        hash_data = data[control_start:control_end]
+    else:
+        # Single-stream APK: hash entire file
+        hash_data = data
+
+    sha1 = hashlib.sha1()
+    sha1.update(hash_data)
     return "Q1" + base64.b64encode(sha1.digest()).decode("ascii")
 
 
@@ -196,6 +230,55 @@ def download_file(url: str, dest: Path, token: Optional[str] = None) -> None:
     with urlopen(req, timeout=300) as response:
         with open(dest, "wb") as f:
             shutil.copyfileobj(response, f)
+
+
+def add_apk_checksums(apk_path: Path) -> bool:
+    """Add embedded SHA1 checksums to APK (required by Alpine 3.13+).
+
+    Repackages the APK with PAX headers containing APK-TOOLS.checksum.SHA1
+    for each file in the archive.
+    """
+    import base64
+
+    try:
+        # Read and extract original APK
+        members_data = []
+        with tarfile.open(apk_path, "r:gz") as tar:
+            for member in tar.getmembers():
+                if member.isfile():
+                    f = tar.extractfile(member)
+                    data = f.read() if f else b""
+                else:
+                    data = None
+                members_data.append((member, data))
+
+        # Check if already has checksums
+        for member, _ in members_data:
+            if member.pax_headers and "APK-TOOLS.checksum.SHA1" in member.pax_headers:
+                return True  # Already has checksums
+
+        # Repackage with checksums
+        with tarfile.open(apk_path, "w:gz") as tar:
+            for member, data in members_data:
+                if data is not None:
+                    # Compute SHA1 checksum for file
+                    sha1 = hashlib.sha1()
+                    sha1.update(data)
+                    checksum = base64.b64encode(sha1.digest()).decode("ascii")
+
+                    # Add PAX header with checksum
+                    member.pax_headers = member.pax_headers or {}
+                    member.pax_headers["APK-TOOLS.checksum.SHA1"] = checksum
+
+                    tar.addfile(member, BytesIO(data))
+                else:
+                    # Directory or other non-file entry
+                    tar.addfile(member)
+
+        return True
+    except Exception as e:
+        print(f"    Warning: Could not add checksums to {apk_path.name}: {e}")
+        return False
 
 
 def extract_apk_info(apk_path: Path) -> dict:
@@ -722,6 +805,9 @@ def main():
                     else:
                         print(f"      Downloading...")
                         download_file(pkg.url, original_path, github.token)
+                        # Add embedded checksums if missing (required by Alpine 3.13+)
+                        if add_apk_checksums(original_path):
+                            print(f"      Added embedded checksums")
                         apk_path = original_path
 
                     # Extract info from .apk to get correct pkgname and pkgver
