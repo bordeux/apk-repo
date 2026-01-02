@@ -9,6 +9,7 @@
       "project_repo": "bordeux/tmpltool",
       "size": 2808017,
       "sha256": "0e78c4b935f6a453476fe9f69abd51b11a558e44e45f6ce914bcdbdc1071896d",
+      "checksum": "Q1vW3GQPzfa4oNWReDsqXPPgdmbe0=",
       "pkgname": "tmpltool",
       "pkgver": "1.2.5-r0",
       "pkgdesc": "A fast and simple command-line template rendering tool using MiniJinja templates",
@@ -31,6 +32,7 @@
       "project_repo": "bordeux/tmpltool",
       "size": 2701827,
       "sha256": "639ce2bc1dbfe8b07e1fba65ae3d7dfe105e6c036d801c462ebd1f289df06428",
+      "checksum": "Q1pZumIWY0dHoEqR8GnJGybndV2lY=",
       "pkgname": "tmpltool",
       "pkgver": "1.2.5-r0",
       "pkgdesc": "A fast and simple command-line template rendering tool using MiniJinja templates",
@@ -45,5 +47,5 @@
       "depends": ""
     }
   ],
-  "updated": "2026-01-02T10:00:20.135415+00:00"
+  "updated": "2026-01-02T10:05:44.247330+00:00"
 }
