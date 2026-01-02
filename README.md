@@ -1,5 +1,7 @@
 # APK Repository Generator
 
+[![Update APK Repository](https://github.com/bordeux/apk-repo/actions/workflows/update-repo.yml/badge.svg)](https://github.com/bordeux/apk-repo/actions/workflows/update-repo.yml)
+
 Generate an Alpine APK repository from GitHub releases containing `.apk` packages. Host your own Alpine Linux package repository on GitHub Pages.
 
 ## How It Works
