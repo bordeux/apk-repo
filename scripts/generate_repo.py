@@ -431,25 +431,24 @@ def generate_apkindex(arch_dir: Path, packages: list[ApkPackage], key_path: Opti
 def sign_index(apkindex_path: Path, private_key_path: Path, key_name: str) -> bool:
     """Sign APKINDEX.tar.gz with RSA private key.
 
-    Alpine APK format uses concatenated gzip streams:
-    1. First gzip stream: tar containing .SIGN.RSA.<keyname>.rsa.pub (the signature)
-    2. Second gzip stream: tar containing APKINDEX and DESCRIPTION (the signed data)
+    Alpine APK format: single gzip stream containing a tar with:
+    1. .SIGN.RSA.<keyname>.rsa.pub (signature of the original gzipped tarball)
+    2. DESCRIPTION
+    3. APKINDEX
 
-    The signature is RSA-SHA1 over the second gzip stream (the control data).
+    The signature is RSA-SHA1 over the original APKINDEX.tar.gz file.
     """
     if not private_key_path.exists():
         return False
 
     try:
-        import gzip
-
-        # Read the original gzipped tarball (this is the control data to sign)
+        # Read the original gzipped tarball - this is what we sign
         with open(apkindex_path, "rb") as f:
-            control_gz_data = f.read()
+            original_gz_data = f.read()
 
-        # Sign the gzipped control data
+        # Sign the original gzipped tarball
         with tempfile.NamedTemporaryFile(delete=False) as data_tmp:
-            data_tmp.write(control_gz_data)
+            data_tmp.write(original_gz_data)
             data_tmp_path = data_tmp.name
 
         with tempfile.NamedTemporaryFile(delete=False) as sig_tmp:
@@ -479,35 +478,30 @@ def sign_index(apkindex_path: Path, private_key_path: Path, key_name: str) -> bo
             os.unlink(data_tmp_path)
             os.unlink(sig_tmp_path)
 
-        # Create the signed file:
-        # Concatenate: [sig gzip stream] + [control gzip stream]
+        # Extract original tar contents
+        original_entries = []
+        with tarfile.open(apkindex_path, "r:gz") as tar:
+            for member in tar.getmembers():
+                f = tar.extractfile(member)
+                if f:
+                    original_entries.append((member.name, f.read(), member.mtime))
+
+        # Create new signed tarball with signature as first entry
         sig_name = f".SIGN.RSA.{key_name}.rsa.pub"
 
-        # Create signature tar manually (without end-of-archive markers)
-        # Tar format: 512-byte header + content padded to 512-byte blocks
-        sig_tar_io = BytesIO()
-        with tarfile.open(fileobj=sig_tar_io, mode="w") as tar:
+        with tarfile.open(apkindex_path, "w:gz") as tar:
+            # Add signature as first entry
             sig_info = tarfile.TarInfo(name=sig_name)
             sig_info.size = len(signature_data)
             sig_info.mtime = int(datetime.now().timestamp())
             tar.addfile(sig_info, BytesIO(signature_data))
-        sig_tar_data = sig_tar_io.getvalue()
 
-        # Strip end-of-archive markers (two 512-byte null blocks)
-        # Alpine expects signature tar without these markers
-        while sig_tar_data.endswith(b'\x00' * 512):
-            sig_tar_data = sig_tar_data[:-512]
-
-        # Gzip the signature tar
-        sig_gz_io = BytesIO()
-        with gzip.GzipFile(fileobj=sig_gz_io, mode="wb", mtime=0) as gz:
-            gz.write(sig_tar_data)
-        sig_gz_data = sig_gz_io.getvalue()
-
-        # Write concatenated gzip streams: signature + control
-        with open(apkindex_path, "wb") as f:
-            f.write(sig_gz_data)
-            f.write(control_gz_data)
+            # Add original entries (DESCRIPTION, APKINDEX)
+            for name, data, mtime in original_entries:
+                info = tarfile.TarInfo(name=name)
+                info.size = len(data)
+                info.mtime = mtime
+                tar.addfile(info, BytesIO(data))
 
         return True
 
