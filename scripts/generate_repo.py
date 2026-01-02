@@ -377,19 +377,17 @@ def generate_apkindex(arch_dir: Path, packages: list[ApkPackage], key_path: Opti
     if not apk_files:
         return False
 
-    # Try using apk index command first
+    # Try using apk index command first (without signing - we sign separately)
     try:
         cmd = ["apk", "index", "-o", str(arch_dir / "APKINDEX.tar.gz")]
-        if key_path and key_path.exists():
-            cmd.extend(["--sign", str(key_path)])
         cmd.extend([str(f) for f in apk_files])
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         if result.returncode == 0:
             return True
-        print(f"    apk index failed: {result.stderr}")
-    except (subprocess.SubprocessError, FileNotFoundError) as e:
-        print(f"    apk command not available: {e}")
+        print(f"    apk index not available, using fallback")
+    except (subprocess.SubprocessError, FileNotFoundError):
+        pass
 
     # Fallback: generate APKINDEX manually
     print("    Generating APKINDEX manually...")
@@ -431,17 +429,18 @@ def generate_apkindex(arch_dir: Path, packages: list[ApkPackage], key_path: Opti
 def sign_index(apkindex_path: Path, private_key_path: Path, key_name: str) -> bool:
     """Sign APKINDEX.tar.gz with RSA private key.
 
-    Alpine APK format: single gzip stream containing a tar with:
-    1. .SIGN.RSA.<keyname>.rsa.pub (signature of the original gzipped tarball)
-    2. DESCRIPTION
-    3. APKINDEX
+    Alpine APK format uses concatenated gzip streams:
+    1. First gzip: tar with .SIGN.RSA.<keyname>.rsa.pub (signature)
+    2. Second gzip: original unsigned APKINDEX.tar.gz
 
-    The signature is RSA-SHA1 over the original APKINDEX.tar.gz file.
+    The signature is RSA-SHA1 over the original (unsigned) gzipped tarball.
     """
     if not private_key_path.exists():
         return False
 
     try:
+        import gzip
+
         # Read the original gzipped tarball - this is what we sign
         with open(apkindex_path, "rb") as f:
             original_gz_data = f.read()
@@ -478,30 +477,30 @@ def sign_index(apkindex_path: Path, private_key_path: Path, key_name: str) -> bo
             os.unlink(data_tmp_path)
             os.unlink(sig_tmp_path)
 
-        # Extract original tar contents
-        original_entries = []
-        with tarfile.open(apkindex_path, "r:gz") as tar:
-            for member in tar.getmembers():
-                f = tar.extractfile(member)
-                if f:
-                    original_entries.append((member.name, f.read(), member.mtime))
-
-        # Create new signed tarball with signature as first entry
+        # Create signature tar (without end-of-archive markers for APK format)
         sig_name = f".SIGN.RSA.{key_name}.rsa.pub"
-
-        with tarfile.open(apkindex_path, "w:gz") as tar:
-            # Add signature as first entry
+        sig_tar_io = BytesIO()
+        with tarfile.open(fileobj=sig_tar_io, mode="w") as tar:
             sig_info = tarfile.TarInfo(name=sig_name)
             sig_info.size = len(signature_data)
             sig_info.mtime = int(datetime.now().timestamp())
             tar.addfile(sig_info, BytesIO(signature_data))
+        sig_tar_data = sig_tar_io.getvalue()
 
-            # Add original entries (DESCRIPTION, APKINDEX)
-            for name, data, mtime in original_entries:
-                info = tarfile.TarInfo(name=name)
-                info.size = len(data)
-                info.mtime = mtime
-                tar.addfile(info, BytesIO(data))
+        # Strip end-of-archive markers (two 512-byte null blocks)
+        while len(sig_tar_data) > 1024 and sig_tar_data[-512:] == b'\x00' * 512:
+            sig_tar_data = sig_tar_data[:-512]
+
+        # Gzip the signature tar
+        sig_gz_io = BytesIO()
+        with gzip.GzipFile(fileobj=sig_gz_io, mode="wb", mtime=0) as gz:
+            gz.write(sig_tar_data)
+        sig_gz_data = sig_gz_io.getvalue()
+
+        # Write: [signature gzip] + [original unsigned gzip]
+        with open(apkindex_path, "wb") as f:
+            f.write(sig_gz_data)
+            f.write(original_gz_data)
 
         return True
 
