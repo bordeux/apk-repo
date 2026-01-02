@@ -12,6 +12,11 @@ on:
         required: false
         type: boolean
         default: false
+      rebuild:
+        description: 'Force rebuild all packages (re-download and re-process)'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -75,6 +80,10 @@ jobs:
 
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
             ARGS="$ARGS --dry-run"
+          fi
+
+          if [ "${{ github.event.inputs.rebuild }}" = "true" ]; then
+            ARGS="$ARGS --rebuild"
           fi
 
           if [ -n "${{ vars.APK_SIGNING_KEY }}" ]; then

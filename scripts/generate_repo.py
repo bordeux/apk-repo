@@ -257,7 +257,7 @@ def download_file(url: str, dest: Path, token: Optional[str] = None) -> None:
             shutil.copyfileobj(response, f)
 
 
-def add_apk_checksums(apk_path: Path) -> bool:
+def add_apk_checksums(apk_path: Path, force: bool = False) -> bool:
     """Convert APK to v2 format with proper checksums (required by Alpine 3.13+).
 
     APK v2 format:
@@ -265,6 +265,10 @@ def add_apk_checksums(apk_path: Path) -> bool:
     - datahash field in .PKGINFO = SHA256 of compressed data.tar.gz
     - PAX headers with APK-TOOLS.checksum.SHA1 for each file (hex format)
     - Uses GNU-style PAX headers (./PaxHeaders/<name>) not POSIX (././@PaxHeader)
+
+    Args:
+        apk_path: Path to the APK file
+        force: If True, rebuild even if datahash already exists
     """
     import gzip
     import struct
@@ -392,7 +396,7 @@ def add_apk_checksums(apk_path: Path) -> bool:
             print(f"    Warning: No .PKGINFO found in {apk_path.name}")
             return False
 
-        if "datahash = " in pkginfo_content:
+        if "datahash = " in pkginfo_content and not force:
             return True  # Already properly formatted
 
         # Build data tar with PAX headers
@@ -416,8 +420,11 @@ def add_apk_checksums(apk_path: Path) -> bool:
         # Compute datahash
         datahash = hashlib.sha256(data_gz).hexdigest()
 
-        # Update PKGINFO
-        pkginfo_lines = pkginfo_content.rstrip("\n").split("\n")
+        # Update PKGINFO (remove old datahash if present)
+        pkginfo_lines = [
+            line for line in pkginfo_content.rstrip("\n").split("\n")
+            if not line.startswith("datahash = ")
+        ]
         pkginfo_lines.append(f"datahash = {datahash}")
         new_pkginfo = "\n".join(pkginfo_lines) + "\n"
 
@@ -883,6 +890,11 @@ def main():
         action="store_true",
         help="Skip signing",
     )
+    parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="Force rebuild (re-download and re-process all packages)",
+    )
 
     args = parser.parse_args()
 
@@ -935,6 +947,25 @@ def main():
     if preserved_packages:
         print(f"Preserving {len(preserved_packages)} package(s) from other projects")
 
+    # If rebuild mode, clear existing packages for projects being updated
+    if args.rebuild and not args.dry_run:
+        print("\n[Rebuild mode: clearing existing packages]")
+        for arch in settings.architectures:
+            arch_dir = output_dir / arch
+            if arch_dir.exists():
+                for apk_file in arch_dir.glob("*.apk"):
+                    apk_file.unlink()
+                    print(f"  Removed {apk_file}")
+                # Also remove APKINDEX
+                apkindex = arch_dir / "APKINDEX.tar.gz"
+                if apkindex.exists():
+                    apkindex.unlink()
+        # Clear manifest
+        manifest_path = output_dir / MANIFEST_FILE
+        if manifest_path.exists():
+            manifest_path.unlink()
+        preserved_packages = []
+
     # Collect new packages
     new_packages: list[ApkPackage] = []
 
@@ -966,17 +997,17 @@ def main():
                     # First check if already exists with expected Alpine name pattern
                     existing_files = list(arch_dir.glob(f"{pkg.name}-{pkg.version}*.apk"))
 
-                    if existing_files:
+                    if existing_files and not args.rebuild:
                         apk_path = existing_files[0]
                         print(f"      Already exists as {apk_path.name}")
-                    elif original_path.exists():
+                    elif original_path.exists() and not args.rebuild:
                         apk_path = original_path
                     else:
                         print(f"      Downloading...")
                         download_file(pkg.url, original_path, github.token)
-                        # Add embedded checksums if missing (required by Alpine 3.13+)
-                        if add_apk_checksums(original_path):
-                            print(f"      Added embedded checksums")
+                        # Add embedded checksums (required by Alpine 3.13+)
+                        if add_apk_checksums(original_path, force=args.rebuild):
+                            print(f"      Converted to v2 format with checksums")
                         apk_path = original_path
 
                     # Extract info from .apk to get correct pkgname and pkgver
