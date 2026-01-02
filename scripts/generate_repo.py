@@ -179,21 +179,26 @@ def compute_sha256(filepath: Path) -> str:
 def compute_apk_checksum(filepath: Path) -> str:
     """Compute APK checksum in Alpine format (Q1 + base64-encoded SHA1).
 
-    For v2 APKs (multi-stream): SHA1 of control.tar.gz (first gzip stream)
-    For v1 APKs (single-stream): SHA1 of entire file
+    For v3 APKs (ADB header): Use apk info to get checksum, or hash entire file
+    For v2 APKs (multi-stream gzip): SHA1 of control.tar.gz (first gzip stream)
+    For v1 APKs (single-stream gzip): SHA1 of entire file
     """
     import base64
-    import gzip
     import zlib
-    from io import BytesIO
 
     with open(filepath, "rb") as f:
         data = f.read()
 
-    # Find the end of the first gzip stream by decompressing with zlib
-    # (gzip module reads all concatenated streams as one)
+    # Check for v3 format (starts with "ADB")
+    if data[:3] == b"ADB":
+        # For v3 packages, hash the entire file
+        # The APKINDEX C: field is the SHA1 of the package file
+        sha1 = hashlib.sha1()
+        sha1.update(data)
+        return "Q1" + base64.b64encode(sha1.digest()).decode("ascii")
+
+    # v2/v1 gzip format
     try:
-        # Skip gzip header (10 bytes minimum)
         if data[:2] != b'\x1f\x8b':
             # Not a gzip file, hash entire file
             hash_data = data
@@ -257,215 +262,31 @@ def download_file(url: str, dest: Path, token: Optional[str] = None) -> None:
             shutil.copyfileobj(response, f)
 
 
-def add_apk_checksums(apk_path: Path, force: bool = False) -> bool:
-    """Convert APK to v2 format with proper checksums (required by Alpine 3.13+).
+def rebuild_apk_with_mkpkg(apk_path: Path, private_key: Optional[Path] = None, force: bool = False) -> bool:
+    """Rebuild APK using apk mkpkg to ensure proper v2/v3 format.
 
-    APK v2 format:
-    - Two concatenated gzip streams: control.tar.gz + data.tar.gz
-    - datahash field in .PKGINFO = SHA256 of compressed data.tar.gz
-    - PAX headers with APK-TOOLS.checksum.SHA1 for each file (hex format)
-    - Uses GNU-style PAX headers (./PaxHeaders/<name>) not POSIX (././@PaxHeader)
+    Uses Alpine's official apk mkpkg tool with --compat 2 to create properly
+    formatted packages that pass integrity checks on Alpine 3.13+.
 
     Args:
         apk_path: Path to the APK file
-        force: If True, rebuild even if datahash already exists
+        private_key: Optional path to RSA private key for signing
+        force: If True, rebuild even if already processed
     """
-    import gzip
-    import struct
-
-    def make_tar_header(name: str, size: int, mtime: int, mode: int, typeflag: str,
-                        uname: str = "root", gname: str = "root") -> bytes:
-        """Create a USTAR tar header."""
-        header = bytearray(512)
-
-        # Name (0-99)
-        name_bytes = name.encode("utf-8")[:100]
-        header[0:len(name_bytes)] = name_bytes
-
-        # Mode (100-107)
-        header[100:108] = f"{mode:07o}\x00".encode("ascii")
-
-        # UID (108-115)
-        header[108:116] = b"0000000\x00"
-
-        # GID (116-123)
-        header[116:124] = b"0000000\x00"
-
-        # Size (124-135)
-        header[124:136] = f"{size:011o}\x00".encode("ascii")
-
-        # Mtime (136-147)
-        header[136:148] = f"{mtime:011o}\x00".encode("ascii")
-
-        # Checksum placeholder (148-155)
-        header[148:156] = b"        "
-
-        # Typeflag (156)
-        header[156] = ord(typeflag)
-
-        # Magic (257-262)
-        header[257:263] = b"ustar\x00"
-
-        # Version (263-264)
-        header[263:265] = b"00"
-
-        # Uname (265-296)
-        uname_bytes = uname.encode("utf-8")[:32]
-        header[265:265+len(uname_bytes)] = uname_bytes
-
-        # Gname (297-328)
-        gname_bytes = gname.encode("utf-8")[:32]
-        header[297:297+len(gname_bytes)] = gname_bytes
-
-        # Calculate checksum
-        checksum = sum(header)
-        header[148:156] = f"{checksum:06o}\x00 ".encode("ascii")
-
-        return bytes(header)
-
-    def make_pax_record(pax_dict: dict) -> bytes:
-        """Create PAX extended header content."""
-        records = []
-        for key, value in pax_dict.items():
-            # Format: "<length> <key>=<value>\n"
-            entry = f"{key}={value}\n"
-            # Calculate length including the length field itself
-            length = len(entry) + 2  # Start with rough estimate
-            while True:
-                full_entry = f"{length} {entry}"
-                if len(full_entry) == length:
-                    break
-                length = len(full_entry)
-            records.append(full_entry)
-        return "".join(records).encode("utf-8")
-
-    def write_entry_with_pax(tar_data: bytearray, name: str, content: bytes | None,
-                              mtime: int, is_dir: bool, pax_dict: dict) -> None:
-        """Write a tar entry with GNU-style PAX headers."""
-        mode = 0o755 if is_dir else 0o644
-        typeflag = "5" if is_dir else "0"
-        size = 0 if is_dir else len(content) if content else 0
-
-        # Write PAX header entry (./PaxHeaders/<name>)
-        pax_content = make_pax_record(pax_dict)
-        pax_name = f"./PaxHeaders/{name}"
-        pax_header = make_tar_header(pax_name, len(pax_content), mtime, 0o644, "x")
-        tar_data.extend(pax_header)
-        tar_data.extend(pax_content)
-        # Pad to 512-byte boundary
-        pad = (512 - len(pax_content) % 512) % 512
-        tar_data.extend(b"\x00" * pad)
-
-        # Write actual file entry
-        file_header = make_tar_header(name, size, mtime, mode, typeflag)
-        tar_data.extend(file_header)
-        if content:
-            tar_data.extend(content)
-            pad = (512 - len(content) % 512) % 512
-            tar_data.extend(b"\x00" * pad)
-
     try:
-        # Read and extract original APK
-        control_files = []  # (name, data)
-        data_files = []     # (name, data, is_dir)
-        pkginfo_content = None
-        builddate = int(datetime.now().timestamp())
-
-        with tarfile.open(apk_path, "r:gz") as tar:
-            for member in tar.getmembers():
-                if member.isfile():
-                    f = tar.extractfile(member)
-                    data = f.read() if f else b""
-                else:
-                    data = None
-
-                if member.name.startswith("."):
-                    control_files.append((member.name, data))
-                    if member.name == ".PKGINFO" and data:
-                        pkginfo_content = data.decode("utf-8", errors="replace")
-                        for line in pkginfo_content.split("\n"):
-                            if line.startswith("builddate"):
-                                try:
-                                    builddate = int(line.split("=")[1].strip())
-                                except (ValueError, IndexError):
-                                    pass
-                else:
-                    data_files.append((member.name, data, member.isdir()))
-
-        if not pkginfo_content:
-            print(f"    Warning: No .PKGINFO found in {apk_path.name}")
+        # Check if apk mkpkg is available
+        result = subprocess.run(["apk", "mkpkg", "--help"], capture_output=True, timeout=10)
+        if result.returncode != 0:
+            print(f"    Warning: apk mkpkg not available, skipping rebuild")
             return False
-
-        if "datahash = " in pkginfo_content and not force:
-            return True  # Already properly formatted
-
-        # Build data tar with PAX headers
-        data_tar = bytearray()
-        for name, content, is_dir in data_files:
-            pax_dict = {"ctime": "0", "atime": "0"}
-            if content is not None:
-                sha1_hex = hashlib.sha1(content).hexdigest()
-                pax_dict["APK-TOOLS.checksum.SHA1"] = sha1_hex
-            write_entry_with_pax(data_tar, name, content, builddate, is_dir, pax_dict)
-
-        # Add end-of-archive markers (two 512-byte null blocks)
-        data_tar.extend(b"\x00" * 1024)
-
-        # Gzip data tar
-        data_gz_io = BytesIO()
-        with gzip.GzipFile(fileobj=data_gz_io, mode="wb", mtime=0) as gz:
-            gz.write(bytes(data_tar))
-        data_gz = data_gz_io.getvalue()
-
-        # Compute datahash
-        datahash = hashlib.sha256(data_gz).hexdigest()
-
-        # Update PKGINFO (remove old datahash if present)
-        pkginfo_lines = [
-            line for line in pkginfo_content.rstrip("\n").split("\n")
-            if not line.startswith("datahash = ")
-        ]
-        pkginfo_lines.append(f"datahash = {datahash}")
-        new_pkginfo = "\n".join(pkginfo_lines) + "\n"
-
-        # Build control tar with PAX headers
-        control_tar = bytearray()
-        for name, content in control_files:
-            if name == ".PKGINFO":
-                content = new_pkginfo.encode("utf-8")
-            pax_dict = {"ctime": "0", "atime": "0"}
-            write_entry_with_pax(control_tar, name, content, builddate, False, pax_dict)
-
-        control_tar.extend(b"\x00" * 1024)
-
-        # Gzip control tar
-        control_gz_io = BytesIO()
-        with gzip.GzipFile(fileobj=control_gz_io, mode="wb", mtime=0) as gz:
-            gz.write(bytes(control_tar))
-        control_gz = control_gz_io.getvalue()
-
-        # Write APK
-        with open(apk_path, "wb") as f:
-            f.write(control_gz)
-            f.write(data_gz)
-
-        return True
-    except Exception as e:
-        print(f"    Warning: Could not convert {apk_path.name} to v2 format: {e}")
-        import traceback
-        traceback.print_exc()
+    except (subprocess.SubprocessError, FileNotFoundError):
+        print(f"    Warning: apk mkpkg not available, skipping rebuild")
         return False
 
-
-def extract_apk_info(apk_path: Path) -> dict:
-    """Extract information from an .apk file.
-
-    APK files are gzipped tarballs with a .PKGINFO file containing metadata.
-    """
-    info = {}
     try:
+        # Extract info and files from original APK
+        pkginfo = {}
         with tarfile.open(apk_path, "r:gz") as tar:
-            # Look for .PKGINFO file
             for member in tar.getmembers():
                 if member.name == ".PKGINFO":
                     f = tar.extractfile(member)
@@ -474,11 +295,129 @@ def extract_apk_info(apk_path: Path) -> dict:
                         for line in content.split("\n"):
                             if "=" in line:
                                 key, _, value = line.partition("=")
-                                key = key.strip()
-                                value = value.strip()
-                                if key and value:
-                                    info[key.lower()] = value
+                                pkginfo[key.strip()] = value.strip()
                     break
+
+        if not pkginfo.get("pkgname"):
+            print(f"    Warning: No .PKGINFO found in {apk_path.name}")
+            return False
+
+        # Create temp directory for extraction
+        with tempfile.TemporaryDirectory() as tmpdir:
+            extract_dir = Path(tmpdir) / "files"
+            extract_dir.mkdir()
+
+            # Extract all files (except .PKGINFO which apk mkpkg will create)
+            with tarfile.open(apk_path, "r:gz") as tar:
+                for member in tar.getmembers():
+                    if not member.name.startswith("."):
+                        tar.extract(member, extract_dir)
+
+            # Build apk mkpkg command
+            output_path = Path(tmpdir) / "output.apk"
+            cmd = [
+                "apk", "mkpkg",
+                "--info", f"name:{pkginfo.get('pkgname', 'unknown')}",
+                "--info", f"version:{pkginfo.get('pkgver', '0.0.0')}",
+                "--info", f"arch:{pkginfo.get('arch', 'noarch')}",
+                "--files", str(extract_dir),
+                "--output", str(output_path),
+                "--compat", "2",
+            ]
+
+            # Add optional metadata
+            if pkginfo.get("pkgdesc"):
+                cmd.extend(["--info", f"description:{pkginfo['pkgdesc']}"])
+            if pkginfo.get("license"):
+                cmd.extend(["--info", f"license:{pkginfo['license']}"])
+            if pkginfo.get("url"):
+                cmd.extend(["--info", f"url:{pkginfo['url']}"])
+            if pkginfo.get("maintainer"):
+                cmd.extend(["--info", f"maintainer:{pkginfo['maintainer']}"])
+            if pkginfo.get("origin"):
+                cmd.extend(["--info", f"origin:{pkginfo['origin']}"])
+
+            # Add signing key if provided
+            if private_key and private_key.exists():
+                cmd.extend(["--sign-key", str(private_key)])
+
+            # Run apk mkpkg
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            if result.returncode != 0:
+                print(f"    Warning: apk mkpkg failed: {result.stderr}")
+                return False
+
+            # Replace original with rebuilt package
+            shutil.copy(output_path, apk_path)
+
+        return True
+
+    except Exception as e:
+        print(f"    Warning: Could not rebuild {apk_path.name}: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def extract_apk_info(apk_path: Path) -> dict:
+    """Extract information from an .apk file.
+
+    Supports both v2 format (gzip tar) and v3 format (ADB header).
+    """
+    info = {}
+
+    try:
+        with open(apk_path, "rb") as f:
+            header = f.read(4)
+
+        # Check for v3 format (starts with "ADB")
+        if header[:3] == b"ADB":
+            # v3 format - use apk info command
+            try:
+                result = subprocess.run(
+                    ["apk", "info", "--contents", "-d", str(apk_path)],
+                    capture_output=True, text=True, timeout=30
+                )
+                if result.returncode == 0:
+                    for line in result.stdout.split("\n"):
+                        if ":" in line:
+                            key, _, value = line.partition(":")
+                            key = key.strip().lower()
+                            value = value.strip()
+                            if key and value:
+                                info[key] = value
+                    return info
+            except (subprocess.SubprocessError, FileNotFoundError):
+                pass
+
+            # Fallback: try parsing the v3 binary format
+            # v3 packages embed metadata that apk can read
+            try:
+                result = subprocess.run(
+                    ["apk", "manifest", str(apk_path)],
+                    capture_output=True, text=True, timeout=30
+                )
+                # Parse manifest output if available
+            except (subprocess.SubprocessError, FileNotFoundError):
+                pass
+
+        # v2 format - gzipped tarball
+        elif header[:2] == b'\x1f\x8b':
+            with tarfile.open(apk_path, "r:gz") as tar:
+                for member in tar.getmembers():
+                    if member.name == ".PKGINFO":
+                        f = tar.extractfile(member)
+                        if f:
+                            content = f.read().decode("utf-8", errors="replace")
+                            for line in content.split("\n"):
+                                if "=" in line:
+                                    key, _, value = line.partition("=")
+                                    key = key.strip()
+                                    value = value.strip()
+                                    if key and value:
+                                        info[key.lower()] = value
+                        break
+
     except (tarfile.TarError, OSError) as e:
         print(f"    Warning: Could not read .PKGINFO from {apk_path.name}: {e}")
 
@@ -1005,9 +944,9 @@ def main():
                     else:
                         print(f"      Downloading...")
                         download_file(pkg.url, original_path, github.token)
-                        # Add embedded checksums (required by Alpine 3.13+)
-                        if add_apk_checksums(original_path, force=args.rebuild):
-                            print(f"      Converted to v2 format with checksums")
+                        # Rebuild with apk mkpkg for proper v2/v3 format
+                        if rebuild_apk_with_mkpkg(original_path, args.private_key, force=args.rebuild):
+                            print(f"      Rebuilt with apk mkpkg (v2 compat)")
                         apk_path = original_path
 
                     # Extract info from .apk to get correct pkgname and pkgver
