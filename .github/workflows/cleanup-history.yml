@@ -77,7 +77,7 @@ jobs:
 
           # Show what will be removed
           echo "=== Commits to be squashed ==="
-          git log --oneline --skip=${COMMITS_TO_KEEP} | head -20
+          git log --oneline --skip=${COMMITS_TO_KEEP} -20 || true
           if [ "${COMMITS_TO_SQUASH}" -gt 20 ]; then
             echo "... and $((COMMITS_TO_SQUASH - 20)) more"
           fi
