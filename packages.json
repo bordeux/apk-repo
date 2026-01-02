@@ -7,9 +7,9 @@
       "url": "https://github.com/bordeux/tmpltool/releases/download/v1.2.5/tmpltool-1.2.5-r0-aarch64.apk",
       "filename": "tmpltool-1.2.5-r0.apk",
       "project_repo": "bordeux/tmpltool",
-      "size": 2789795,
-      "sha256": "0e009efb2a6c5f00e7c5809178e5e106a596c9af446d40fea9932ee64817b765",
-      "checksum": "Q1gtYJ8kKMiqyQCCZQC3XwVUXe/Qg=",
+      "size": 2808017,
+      "sha256": "0e78c4b935f6a453476fe9f69abd51b11a558e44e45f6ce914bcdbdc1071896d",
+      "checksum": "Q1vW3GQPzfa4oNWReDsqXPPgdmbe0=",
       "pkgname": "tmpltool",
       "pkgver": "1.2.5-r0",
       "pkgdesc": "A fast and simple command-line template rendering tool using MiniJinja templates",
@@ -30,9 +30,9 @@
       "url": "https://github.com/bordeux/tmpltool/releases/download/v1.2.5/tmpltool-1.2.5-r0-x86_64.apk",
       "filename": "tmpltool-1.2.5-r0.apk",
       "project_repo": "bordeux/tmpltool",
-      "size": 2682673,
-      "sha256": "18cdb7aeaa9ceee09af21f5a55bc7c9226588a11eac2251c2819a6e24514ab37",
-      "checksum": "Q1zwypkrZNJjODMvy0c4eFq75r2V4=",
+      "size": 2701827,
+      "sha256": "639ce2bc1dbfe8b07e1fba65ae3d7dfe105e6c036d801c462ebd1f289df06428",
+      "checksum": "Q1pZumIWY0dHoEqR8GnJGybndV2lY=",
       "pkgname": "tmpltool",
       "pkgver": "1.2.5-r0",
       "pkgdesc": "A fast and simple command-line template rendering tool using MiniJinja templates",
@@ -47,5 +47,5 @@
       "depends": ""
     }
   ],
-  "updated": "2026-01-02T11:43:38.601003+00:00"
+  "updated": "2026-01-02T12:01:56.892411+00:00"
 }
