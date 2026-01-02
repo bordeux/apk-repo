@@ -428,29 +428,87 @@ def generate_apkindex(arch_dir: Path, packages: list[ApkPackage], key_path: Opti
         return False
 
 
-def sign_index(apkindex_path: Path, private_key_path: Path) -> bool:
-    """Sign APKINDEX.tar.gz with RSA private key."""
+def sign_index(apkindex_path: Path, private_key_path: Path, key_name: str) -> bool:
+    """Sign APKINDEX.tar.gz with RSA private key.
+
+    Alpine APK format uses concatenated gzip streams:
+    1. First gzip stream: tar containing .SIGN.RSA.<keyname>.rsa.pub (the signature)
+    2. Second gzip stream: tar containing APKINDEX and DESCRIPTION (the signed data)
+
+    The signature is RSA-SHA1 over the second gzip stream (the control data).
+    """
     if not private_key_path.exists():
         return False
 
     try:
-        # Create signature using openssl
-        sig_path = apkindex_path.with_suffix(".tar.gz.sig")
-        result = subprocess.run(
-            [
-                "openssl", "dgst", "-sha256",
-                "-sign", str(private_key_path),
-                "-out", str(sig_path),
-                str(apkindex_path)
-            ],
-            capture_output=True,
-            timeout=60,
-        )
-        if result.returncode == 0:
-            return True
-        print(f"    Signing failed: {result.stderr.decode()}")
+        import gzip
+
+        # Read the original gzipped tarball (this is the control data to sign)
+        with open(apkindex_path, "rb") as f:
+            control_gz_data = f.read()
+
+        # Sign the gzipped control data
+        with tempfile.NamedTemporaryFile(delete=False) as data_tmp:
+            data_tmp.write(control_gz_data)
+            data_tmp_path = data_tmp.name
+
+        with tempfile.NamedTemporaryFile(delete=False) as sig_tmp:
+            sig_tmp_path = sig_tmp.name
+
+        try:
+            result = subprocess.run(
+                [
+                    "openssl", "dgst", "-sha1",
+                    "-sign", str(private_key_path),
+                    "-out", sig_tmp_path,
+                    data_tmp_path
+                ],
+                capture_output=True,
+                timeout=60,
+            )
+
+            if result.returncode != 0:
+                print(f"    Signing failed: {result.stderr.decode()}")
+                return False
+
+            # Read the signature
+            with open(sig_tmp_path, "rb") as f:
+                signature_data = f.read()
+
+        finally:
+            os.unlink(data_tmp_path)
+            os.unlink(sig_tmp_path)
+
+        # Create the signed file:
+        # Concatenate: [sig gzip stream] + [control gzip stream]
+        sig_name = f".SIGN.RSA.{key_name}.rsa.pub"
+
+        # Create signature tar
+        sig_tar_io = BytesIO()
+        with tarfile.open(fileobj=sig_tar_io, mode="w") as tar:
+            sig_info = tarfile.TarInfo(name=sig_name)
+            sig_info.size = len(signature_data)
+            sig_info.mtime = int(datetime.now().timestamp())
+            tar.addfile(sig_info, BytesIO(signature_data))
+        sig_tar_data = sig_tar_io.getvalue()
+
+        # Gzip the signature tar
+        sig_gz_io = BytesIO()
+        with gzip.GzipFile(fileobj=sig_gz_io, mode="wb", mtime=0) as gz:
+            gz.write(sig_tar_data)
+        sig_gz_data = sig_gz_io.getvalue()
+
+        # Write concatenated gzip streams: signature + control
+        with open(apkindex_path, "wb") as f:
+            f.write(sig_gz_data)
+            f.write(control_gz_data)
+
+        return True
+
     except (subprocess.SubprocessError, FileNotFoundError) as e:
         print(f"    openssl not available: {e}")
+    except Exception as e:
+        print(f"    Error during signing: {e}")
 
     return False
 
@@ -705,8 +763,8 @@ def main():
                 # Sign if key provided
                 if not args.no_sign and args.private_key:
                     apkindex_path = arch_dir / "APKINDEX.tar.gz"
-                    if sign_index(apkindex_path, args.private_key):
-                        print(f"    Created signature")
+                    if sign_index(apkindex_path, args.private_key, settings.key_name):
+                        print(f"    Signed with {settings.key_name}")
             else:
                 print(f"    Warning: Could not generate APKINDEX")
         else:

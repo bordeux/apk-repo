@@ -129,16 +129,17 @@ Generated repository layout:
 ```
 apk-repo/
 ├── x86_64/
-│   ├── APKINDEX.tar.gz      (package index)
-│   ├── APKINDEX.tar.gz.sig  (signature, if signed)
+│   ├── APKINDEX.tar.gz      (signed package index)
 │   └── *.apk                (packages)
 ├── aarch64/
 │   ├── APKINDEX.tar.gz
 │   └── *.apk
 ├── keys/
-│   └── alpine@bordeux.rsa.pub  (public key, if signed)
+│   └── alpine@bordeux.rsa.pub  (public key for verification)
 └── packages.json            (manifest for incremental updates)
 ```
+
+When signed, the `APKINDEX.tar.gz` contains an embedded `.SIGN.RSA.<keyname>.rsa.pub` entry as required by Alpine's APK format.
 
 ## Requirements
 
