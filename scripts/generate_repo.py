@@ -53,6 +53,7 @@ class ApkPackage:
     project_repo: str = ""
     size: int = 0
     sha256: str = ""
+    checksum: str = ""  # Alpine format: Q1 + base64(sha1)
     # Extracted from .apk
     pkgname: str = ""
     pkgver: str = ""
@@ -173,6 +174,16 @@ def compute_sha256(filepath: Path) -> str:
         while chunk := f.read(8192):
             sha256.update(chunk)
     return sha256.hexdigest()
+
+
+def compute_apk_checksum(filepath: Path) -> str:
+    """Compute APK checksum in Alpine format (Q1 + base64-encoded SHA1)."""
+    import base64
+    sha1 = hashlib.sha1()
+    with open(filepath, "rb") as f:
+        while chunk := f.read(8192):
+            sha1.update(chunk)
+    return "Q1" + base64.b64encode(sha1.digest()).decode("ascii")
 
 
 def download_file(url: str, dest: Path, token: Optional[str] = None) -> None:
@@ -350,7 +361,7 @@ def save_manifest(output_dir: Path, packages: list[ApkPackage]) -> None:
 
 def generate_apkindex_entry(pkg: ApkPackage) -> str:
     """Generate an APKINDEX entry for a package."""
-    entry = f"""C:Q1{pkg.sha256[:40]}
+    entry = f"""C:{pkg.checksum}
 P:{pkg.pkgname or pkg.name}
 V:{pkg.pkgver or pkg.version}
 A:{pkg.arch or pkg.architecture}
@@ -741,8 +752,9 @@ def main():
                             apk_path.unlink()
                         apk_path = final_path
 
-                    # Compute hash
+                    # Compute hashes
                     pkg.sha256 = compute_sha256(apk_path)
+                    pkg.checksum = compute_apk_checksum(apk_path)
                     pkg.size = apk_path.stat().st_size
 
                     new_packages.append(pkg)
