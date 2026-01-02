@@ -937,20 +937,24 @@ def main():
                     # First check if already exists with expected Alpine name pattern
                     existing_files = list(arch_dir.glob(f"{pkg.name}-{pkg.version}*.apk"))
 
+                    needs_download = True
+                    needs_rebuild = True
+
                     if existing_files and not args.rebuild:
                         apk_path = existing_files[0]
                         print(f"      Already exists as {apk_path.name}")
+                        needs_download = False
+                        needs_rebuild = False
                     elif original_path.exists() and not args.rebuild:
                         apk_path = original_path
+                        needs_download = False
+                        needs_rebuild = False
                     else:
                         print(f"      Downloading...")
                         download_file(pkg.url, original_path, github.token)
-                        # Rebuild with apk mkpkg for proper v2/v3 format
-                        if rebuild_apk_with_mkpkg(original_path, args.private_key, force=args.rebuild):
-                            print(f"      Rebuilt with apk mkpkg (v2 compat)")
                         apk_path = original_path
 
-                    # Extract info from .apk to get correct pkgname and pkgver
+                    # Extract info BEFORE rebuilding (v1/v2 format is readable)
                     info = extract_apk_info(apk_path)
                     if info:
                         pkg.pkgname = info.get("pkgname", pkg.name)
@@ -963,6 +967,17 @@ def main():
                         pkg.builddate = info.get("builddate", "")
                         pkg.depends = info.get("depend", "")
                         pkg.provides = info.get("provides", "")
+
+                    # Rebuild with apk mkpkg for proper v2/v3 format (AFTER extracting info)
+                    if needs_rebuild:
+                        if rebuild_apk_with_mkpkg(apk_path, args.private_key, force=args.rebuild):
+                            print(f"      Rebuilt with apk mkpkg (v2 compat)")
+
+                    # Ensure we have pkgname and pkgver (use fallbacks if needed)
+                    if not pkg.pkgname:
+                        pkg.pkgname = pkg.name
+                    if not pkg.pkgver:
+                        pkg.pkgver = pkg.version
 
                     # Rename file to Alpine standard format: {pkgname}-{pkgver}.apk
                     expected_filename = f"{pkg.pkgname}-{pkg.pkgver}.apk"
