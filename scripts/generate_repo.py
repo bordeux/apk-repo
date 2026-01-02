@@ -696,21 +696,24 @@ def main():
                     if args.dry_run:
                         continue
 
-                    # Download .apk file to architecture directory
                     arch_dir = output_dir / pkg.architecture
-                    apk_path = arch_dir / pkg.filename
+                    original_path = arch_dir / pkg.filename
 
-                    if not apk_path.exists():
-                        print(f"      Downloading...")
-                        download_file(pkg.url, apk_path, github.token)
+                    # Check if file needs to be downloaded
+                    # First check if already exists with expected Alpine name pattern
+                    existing_files = list(arch_dir.glob(f"{pkg.name}-{pkg.version}*.apk"))
+
+                    if existing_files:
+                        apk_path = existing_files[0]
+                        print(f"      Already exists as {apk_path.name}")
+                    elif original_path.exists():
+                        apk_path = original_path
                     else:
-                        print(f"      Already exists, skipping download")
+                        print(f"      Downloading...")
+                        download_file(pkg.url, original_path, github.token)
+                        apk_path = original_path
 
-                    # Compute hash
-                    pkg.sha256 = compute_sha256(apk_path)
-                    pkg.size = apk_path.stat().st_size
-
-                    # Extract info from .apk
+                    # Extract info from .apk to get correct pkgname and pkgver
                     info = extract_apk_info(apk_path)
                     if info:
                         pkg.pkgname = info.get("pkgname", pkg.name)
@@ -723,6 +726,24 @@ def main():
                         pkg.builddate = info.get("builddate", "")
                         pkg.depends = info.get("depend", "")
                         pkg.provides = info.get("provides", "")
+
+                    # Rename file to Alpine standard format: {pkgname}-{pkgver}.apk
+                    expected_filename = f"{pkg.pkgname}-{pkg.pkgver}.apk"
+                    final_path = arch_dir / expected_filename
+                    pkg.filename = expected_filename
+
+                    if apk_path != final_path and apk_path.exists():
+                        if not final_path.exists():
+                            apk_path.rename(final_path)
+                            print(f"      Renamed to {expected_filename}")
+                        else:
+                            # Remove duplicate original
+                            apk_path.unlink()
+                        apk_path = final_path
+
+                    # Compute hash
+                    pkg.sha256 = compute_sha256(apk_path)
+                    pkg.size = apk_path.stat().st_size
 
                     new_packages.append(pkg)
 
