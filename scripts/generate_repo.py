@@ -179,40 +179,65 @@ def compute_sha256(filepath: Path) -> str:
 def compute_apk_checksum(filepath: Path) -> str:
     """Compute APK checksum in Alpine format (Q1 + base64-encoded SHA1).
 
-    For multi-stream APKs: SHA1 of control segment (second gzip stream)
-    For single-stream APKs: SHA1 of entire file
+    For v2 APKs (multi-stream): SHA1 of control.tar.gz (first gzip stream)
+    For v1 APKs (single-stream): SHA1 of entire file
     """
     import base64
     import gzip
+    import zlib
     from io import BytesIO
 
     with open(filepath, "rb") as f:
         data = f.read()
 
-    # Count gzip streams by sequential decompression
-    stream_count = 0
-    stream_boundaries = []
-    remaining = BytesIO(data)
+    # Find the end of the first gzip stream by decompressing with zlib
+    # (gzip module reads all concatenated streams as one)
+    try:
+        # Skip gzip header (10 bytes minimum)
+        if data[:2] != b'\x1f\x8b':
+            # Not a gzip file, hash entire file
+            hash_data = data
+        else:
+            # Parse gzip header to find start of compressed data
+            flags = data[3]
+            pos = 10
 
-    while remaining.tell() < len(data):
-        start = remaining.tell()
-        try:
-            gz = gzip.GzipFile(fileobj=remaining)
-            gz.read()  # Decompress to find end
-            end = remaining.tell()
-            stream_boundaries.append((start, end))
-            stream_count += 1
-            if stream_count > 3:  # APKs have max 3 streams
-                break
-        except (EOFError, OSError):
-            break
+            # Skip extra field
+            if flags & 0x04:
+                xlen = data[pos] + (data[pos+1] << 8)
+                pos += 2 + xlen
 
-    if stream_count >= 2:
-        # Multi-stream APK: hash the control segment (2nd stream)
-        control_start, control_end = stream_boundaries[1]
-        hash_data = data[control_start:control_end]
-    else:
-        # Single-stream APK: hash entire file
+            # Skip filename
+            if flags & 0x08:
+                while data[pos] != 0:
+                    pos += 1
+                pos += 1
+
+            # Skip comment
+            if flags & 0x10:
+                while data[pos] != 0:
+                    pos += 1
+                pos += 1
+
+            # Skip header CRC
+            if flags & 0x02:
+                pos += 2
+
+            # Decompress to find where first stream ends
+            decompressor = zlib.decompressobj(-zlib.MAX_WBITS)
+            decompressor.decompress(data[pos:])
+            unused = len(decompressor.unused_data)
+
+            if unused >= 8:  # CRC32 + ISIZE at end
+                first_stream_end = len(data) - unused + 8
+                # Check if there's a second gzip stream
+                if first_stream_end < len(data) and data[first_stream_end:first_stream_end+2] == b'\x1f\x8b':
+                    hash_data = data[:first_stream_end]
+                else:
+                    hash_data = data
+            else:
+                hash_data = data
+    except Exception:
         hash_data = data
 
     sha1 = hashlib.sha1()
@@ -233,16 +258,22 @@ def download_file(url: str, dest: Path, token: Optional[str] = None) -> None:
 
 
 def add_apk_checksums(apk_path: Path) -> bool:
-    """Add embedded SHA1 checksums to APK (required by Alpine 3.13+).
+    """Convert APK to v2 format with proper checksums (required by Alpine 3.13+).
 
-    Repackages the APK with PAX headers containing APK-TOOLS.checksum.SHA1
-    for each file in the archive.
+    APK v2 format:
+    - Two concatenated gzip streams: control.tar.gz + data.tar.gz
+    - datahash field in .PKGINFO = SHA256 of compressed data.tar.gz
+    - PAX headers with APK-TOOLS.checksum.SHA1 for each file
     """
     import base64
+    import gzip
 
     try:
         # Read and extract original APK
-        members_data = []
+        control_members = []  # .PKGINFO and scripts (.pre-install, .post-install, etc.)
+        data_members = []     # Everything else
+        pkginfo_content = None
+
         with tarfile.open(apk_path, "r:gz") as tar:
             for member in tar.getmembers():
                 if member.isfile():
@@ -250,34 +281,82 @@ def add_apk_checksums(apk_path: Path) -> bool:
                     data = f.read() if f else b""
                 else:
                     data = None
-                members_data.append((member, data))
 
-        # Check if already has checksums
-        for member, _ in members_data:
-            if member.pax_headers and "APK-TOOLS.checksum.SHA1" in member.pax_headers:
-                return True  # Already has checksums
+                # Control files start with . and are at root level
+                if member.name.startswith("."):
+                    control_members.append((member, data))
+                    if member.name == ".PKGINFO" and data:
+                        pkginfo_content = data.decode("utf-8", errors="replace")
+                else:
+                    data_members.append((member, data))
 
-        # Repackage with checksums
-        with tarfile.open(apk_path, "w:gz") as tar:
-            for member, data in members_data:
+        if not pkginfo_content:
+            print(f"    Warning: No .PKGINFO found in {apk_path.name}")
+            return False
+
+        # Check if already has datahash
+        if "datahash = " in pkginfo_content:
+            return True  # Already properly formatted
+
+        # Create data.tar.gz with PAX checksums
+        data_tar_io = BytesIO()
+        with tarfile.open(fileobj=data_tar_io, mode="w") as tar:
+            for member, data in data_members:
                 if data is not None:
-                    # Compute SHA1 checksum for file
+                    # Add PAX header with SHA1 checksum
                     sha1 = hashlib.sha1()
                     sha1.update(data)
                     checksum = base64.b64encode(sha1.digest()).decode("ascii")
-
-                    # Add PAX header with checksum
                     member.pax_headers = member.pax_headers or {}
                     member.pax_headers["APK-TOOLS.checksum.SHA1"] = checksum
-
                     tar.addfile(member, BytesIO(data))
                 else:
-                    # Directory or other non-file entry
                     tar.addfile(member)
+        data_tar_data = data_tar_io.getvalue()
+
+        # Gzip the data tar
+        data_gz_io = BytesIO()
+        with gzip.GzipFile(fileobj=data_gz_io, mode="wb", mtime=0) as gz:
+            gz.write(data_tar_data)
+        data_gz_data = data_gz_io.getvalue()
+
+        # Compute datahash (SHA256 of compressed data tarball)
+        datahash = hashlib.sha256(data_gz_data).hexdigest()
+
+        # Update .PKGINFO with datahash
+        pkginfo_lines = pkginfo_content.rstrip("\n").split("\n")
+        pkginfo_lines.append(f"datahash = {datahash}")
+        new_pkginfo = "\n".join(pkginfo_lines) + "\n"
+
+        # Create control.tar.gz
+        control_tar_io = BytesIO()
+        with tarfile.open(fileobj=control_tar_io, mode="w") as tar:
+            for member, data in control_members:
+                if member.name == ".PKGINFO":
+                    # Use updated PKGINFO
+                    new_data = new_pkginfo.encode("utf-8")
+                    member.size = len(new_data)
+                    tar.addfile(member, BytesIO(new_data))
+                elif data is not None:
+                    tar.addfile(member, BytesIO(data))
+                else:
+                    tar.addfile(member)
+        control_tar_data = control_tar_io.getvalue()
+
+        # Gzip the control tar
+        control_gz_io = BytesIO()
+        with gzip.GzipFile(fileobj=control_gz_io, mode="wb", mtime=0) as gz:
+            gz.write(control_tar_data)
+        control_gz_data = control_gz_io.getvalue()
+
+        # Write concatenated APK: control.tar.gz + data.tar.gz
+        with open(apk_path, "wb") as f:
+            f.write(control_gz_data)
+            f.write(data_gz_data)
 
         return True
     except Exception as e:
-        print(f"    Warning: Could not add checksums to {apk_path.name}: {e}")
+        print(f"    Warning: Could not convert {apk_path.name} to v2 format: {e}")
         return False
 
 
